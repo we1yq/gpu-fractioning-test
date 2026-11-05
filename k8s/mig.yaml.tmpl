@@ -1,0 +1,28 @@
+# MIG Pod. Assumes the partition already exists: repartitioning needs its own
+# maintenance window, and run.sh never reconfigures MIG.
+# The resource name assumes the device plugin's "mixed" MIG strategy.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: __NAME__
+  namespace: __NAMESPACE__
+  labels:
+    app: gpu-bench
+    bench-run: __RUN_ID__
+spec:
+  restartPolicy: Never
+  containers:
+    - name: bench
+      image: __IMAGE__
+      command: ["python3", "/bench/bench.py"]
+      args: __ARGS__
+      env:
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+      resources:
+        requests: {cpu: "__CPU__", memory: 8Gi, nvidia.com/mig-__MIG_PROFILE__: 1}
+        limits: {cpu: "__CPU__", memory: 8Gi, nvidia.com/mig-__MIG_PROFILE__: 1}
+      volumeMounts:
+        - {name: bench-code, mountPath: /bench, readOnly: true}
+  volumes:
+    - name: bench-code
+      configMap: {name: __CONFIGMAP__}

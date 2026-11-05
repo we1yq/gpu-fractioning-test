@@ -1,0 +1,31 @@
+# Traditional MPS Pod.
+#
+# Assumes MPS sharing is already enabled through the GPU Operator device plugin
+# config. run.sh never changes that. Requires the Fractioning stack to be off, and
+# the node's sharing setup to be confirmed before use: the resource name below
+# may differ (for example a renamed replica resource).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: __NAME__
+  namespace: __NAMESPACE__
+  labels:
+    app: gpu-bench
+    bench-run: __RUN_ID__
+spec:
+  restartPolicy: Never
+  containers:
+    - name: bench
+      image: __IMAGE__
+      command: ["python3", "/bench/bench.py"]
+      args: __ARGS__
+      env:
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+      resources:
+        requests: {cpu: "__CPU__", memory: 8Gi, nvidia.com/gpu: 1}
+        limits: {cpu: "__CPU__", memory: 8Gi, nvidia.com/gpu: 1}
+      volumeMounts:
+        - {name: bench-code, mountPath: /bench, readOnly: true}
+  volumes:
+    - name: bench-code
+      configMap: {name: __CONFIGMAP__}

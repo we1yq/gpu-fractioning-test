@@ -1,0 +1,42 @@
+# GPU Fractioning Pod.
+#
+# VERIFY against the manifest used in the smoke test before the first real run.
+# Annotation names follow NVIDIA's CUDA 13.4 memory-enforced sharing post, but
+# were not checked against v0.1.8 on the cluster. In particular: the memory value
+# format, the queue name, and whether a resources entry is also needed.
+#
+# compute mode: run.sh removes the gpu-compute.mode line for time-slicing, which
+# is the default, and sets it to sm-sharing otherwise.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: __NAME__
+  namespace: __NAMESPACE__
+  labels:
+    app: gpu-bench
+    bench-run: __RUN_ID__
+    kai.scheduler/queue: __QUEUE__
+  annotations:
+    nvidia.com/container.bench.gpu-memory.request: "__GPU_MEMORY__"
+    nvidia.com/container.bench.gpu-memory.limit: "__GPU_MEMORY__"
+    nvidia.com/container.bench.gpu-compute.mode: "__COMPUTE_MODE__"
+spec:
+  schedulerName: kai-scheduler
+  restartPolicy: Never
+  containers:
+    - name: bench
+      image: __IMAGE__
+      command: ["python3", "/bench/bench.py"]
+      args: __ARGS__
+      env:
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+      resources:
+        # torch.cuda.synchronize() spins a core; equal, exclusive CPU keeps CPU
+        # contention from being mistaken for GPU contention.
+        requests: {cpu: "__CPU__", memory: 8Gi}
+        limits: {cpu: "__CPU__", memory: 8Gi}
+      volumeMounts:
+        - {name: bench-code, mountPath: /bench, readOnly: true}
+  volumes:
+    - name: bench-code
+      configMap: {name: __CONFIGMAP__}
