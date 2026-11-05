@@ -82,7 +82,8 @@ def collect(results_dir):
         if meta.get("tag", "").startswith("cap"):
             continue
         workload = "-".join(filter(None, (meta.get("tag"), meta["workload"], meta.get("size"))))
-        cell_key = (meta["mode"], meta["config"], workload, meta["noisy"], meta["rate"], meta["n"])
+        noisy = "-".join(filter(None, (meta["noisy"], meta.get("noisy_size"))))
+        cell_key = (meta["mode"], meta["config"], workload, noisy, meta["rate"], meta["n"])
         roles = {p["role"] for p in pods} or {"unknown"}
         if reason:
             print(f"excluded {meta_path.parent}: {reason}", file=sys.stderr)

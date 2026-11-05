@@ -23,6 +23,8 @@ REQUEST=10Gi NO_LIMIT=40Gi LIMIT=10Gi FRACTION=0.25
 # Below what a victim can sustain next to long kernels (390-1070 requests/s in round
 # one), so queueing reflects interference rather than an overloaded victim.
 VICTIM_RATE=100
+# Next to 67 ms kernels the victim only reaches about 49 requests/s.
+LONG_KERNEL_VICTIM_RATE=30
 PROBE="--workload gemm --size 2048"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -50,7 +52,8 @@ runtime_cells() {
   for n in 1 2 4; do echo "--workload gemm -n $n"; done
   echo "--workload smallkernel --rate $VICTIM_RATE -n 1"
   echo "--workload smallkernel --rate $VICTIM_RATE --noisy gemm -n 2"
-  echo "--workload smallkernel --rate $VICTIM_RATE --noisy gemm --noisy-size 8192 -n 2"
+  echo "--workload smallkernel --rate $LONG_KERNEL_VICTIM_RATE -n 1"
+  echo "--workload smallkernel --rate $LONG_KERNEL_VICTIM_RATE --noisy gemm --noisy-size 8192 -n 2"
   for n in 1 2; do echo "--workload membw -n $n"; done
   for n in 1 2; do echo "--workload hostcopy -n $n"; done
   echo "--workload gemm --noisy hostcopy -n 2"

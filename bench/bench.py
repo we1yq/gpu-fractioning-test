@@ -31,6 +31,7 @@ EXIT_OOM = 2
 EXIT_GPU_ERROR = 3
 SCHEMA_VERSION = 3
 HOLD_CHUNK_MIB = 256
+HOLD_RELEASE_CHUNKS = 2
 
 # Log-spaced histogram: 20 buckets per decade from 1 us up to about 1000 s.
 HIST_BUCKETS_PER_DECADE = 20
@@ -267,6 +268,9 @@ def hold_memory(target_mib, device):
             chunk.fill_(1.0)
             chunks.append(chunk)
     except torch.cuda.OutOfMemoryError:
+        # Give some back: a Pod that holds its whole quota has no room to run its
+        # probe, and the capacity experiments need to see how it behaves.
+        del chunks[-HOLD_RELEASE_CHUNKS:]
         if device.startswith("cuda"):
             torch.cuda.empty_cache()
         return chunks, True
