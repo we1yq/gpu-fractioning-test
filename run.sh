@@ -7,7 +7,7 @@
 # Interference (Pod 0 is the victim, the other n-1 Pods run --noisy):
 #   ./run.sh ... --workload smallkernel --rate 200 --noisy gemm -n 4
 #
-# This script only creates its own Pods and one ConfigMap. It never changes
+# This script only creates its own Namespace, Pods and one ConfigMap. It never changes
 # GpuFractioningConfig, the device plugin, Helm releases or MIG partitions.
 #
 # KUBECTL overrides the client, for example:
@@ -19,7 +19,7 @@ read -r -a KUBE <<<"${KUBECTL:-kubectl}"
 
 MODE="" COMPUTE="time-slicing" IMAGE="" WORKLOAD="" NOISY="" SIZE="" RATE=0
 COUNT=1 REPS=5 DURATION=60 WARMUP=10 SLACK=120 COOLDOWN=10 TIMEOUT=600
-GPU_MEMORY="4Gi" MIG_PROFILE="" CPU=2 QUEUE="default-queue" NAMESPACE="default"
+GPU_MEMORY="4Gi" MIG_PROFILE="" CPU=2 QUEUE="default-queue" NAMESPACE="gpu-bench"
 RESULTS="$ROOT/results" CONFIRMED=0 DRY_RUN=0
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -77,9 +77,7 @@ RATE_TAG=""
 CELL="$MODE-$CONFIG/$WORKLOAD$RATE_TAG${NOISY:++$NOISY}/n$COUNT"
 
 render_pod() { # name run_id args_json
-  local compute_filter='s/__COMPUTE_MODE__/sm-sharing/'
-  [[ "$COMPUTE" == sm-sharing ]] || compute_filter='/__COMPUTE_MODE__/d'
-  sed -e "$compute_filter" \
+  sed -e "s|__COMPUTE_MODE__|$COMPUTE|" \
       -e "s|__NAME__|$1|; s|__RUN_ID__|$2|; s|__ARGS__|$3|" \
       -e "s|__IMAGE__|$IMAGE|; s|__NAMESPACE__|$NAMESPACE|; s|__QUEUE__|$QUEUE|" \
       -e "s|__GPU_MEMORY__|$GPU_MEMORY|g; s|__MIG_PROFILE__|$MIG_PROFILE|g" \
@@ -151,6 +149,7 @@ if [[ "$MODE" == fractioning ]]; then
   [[ "$ready" == *True* ]] || die "no GpuFractioningConfig is Ready; restore it first (this script will not)"
 fi
 
+"${KUBE[@]}" create namespace "$NAMESPACE" --dry-run=client -o yaml | "${KUBE[@]}" apply -f - >/dev/null
 "${KUBE[@]}" create configmap "$CONFIGMAP" -n "$NAMESPACE" \
   --from-file="$ROOT/bench/bench.py" --from-file="$ROOT/bench/workloads.py" \
   --dry-run=client -o yaml | "${KUBE[@]}" apply -f - >/dev/null

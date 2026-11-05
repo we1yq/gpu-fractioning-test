@@ -45,7 +45,7 @@ analyze/    汇总 P50/P99 和干扰系数（作图待第 5 步补充）
 python3 analyze/summarize.py results -o results/summary.csv
 ```
 
-`run.sh` 只创建自己的 Pod 和一个 ConfigMap，不会改动 `GpuFractioningConfig`、
+`run.sh` 只创建自己的 Namespace、Pod 和一个 ConfigMap，不会改动 `GpuFractioningConfig`、
 device plugin、Helm Release 或 MIG 分区。代码通过 ConfigMap 挂载，
 镜像只需要带 PyTorch。
 

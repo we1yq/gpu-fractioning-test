@@ -1,12 +1,8 @@
 # GPU Fractioning Pod.
 #
-# VERIFY against the manifest used in the smoke test before the first real run.
-# Annotation names follow NVIDIA's CUDA 13.4 memory-enforced sharing post, but
-# were not checked against v0.1.8 on the cluster. In particular: the memory value
-# format, the queue name, and whether a resources entry is also needed.
-#
-# compute mode: run.sh removes the gpu-compute.mode line for time-slicing, which
-# is the default, and sets it to sm-sharing otherwise.
+# Annotations, memory format, queue and scheduler match the smoke-test manifests
+# that passed on the cluster. The annotation key embeds the container name, so
+# "bench" here must stay in step with the container below.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -22,6 +18,7 @@ metadata:
     nvidia.com/container.bench.gpu-compute.mode: "__COMPUTE_MODE__"
 spec:
   schedulerName: kai-scheduler
+  automountServiceAccountToken: false
   restartPolicy: Never
   containers:
     - name: bench
