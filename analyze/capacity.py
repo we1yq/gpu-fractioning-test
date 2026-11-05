@@ -11,6 +11,14 @@ import sys
 from pathlib import Path
 
 
+def worst_second(timeline):
+    """The slowest second of a run, as (unix second, ms)."""
+    if not timeline:
+        return None
+    second = max(timeline, key=lambda s: timeline[s][1])
+    return int(second), round(timeline[second][1] / 1000, 2)
+
+
 def pod_row(exit_path):
     exit_code = exit_path.read_text().strip() or "?"
     json_path = exit_path.with_suffix(".json")
@@ -28,6 +36,9 @@ def pod_row(exit_path):
         "p50_ms": round(summary["p50_us"] / 1000, 2) if summary.get("p50_us") else None,
         "p99_ms": round(summary["p99_us"] / 1000, 2) if summary.get("p99_us") else None,
         "error": (pod.get("error") or "")[:90],
+        "error_at": round(pod["error_at_unix"], 1) if pod.get("error_at_unix") else None,
+        "held_at": round(pod["held_at_unix"], 1) if pod.get("held_at_unix") else None,
+        "worst_ms": worst_second(pod.get("timeline")),
     }
 
 

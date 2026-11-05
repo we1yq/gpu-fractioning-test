@@ -123,7 +123,18 @@ def wait_until(deadline):
             time.sleep(remaining - 0.001)
 
 
-def run_closed_loop(workload, sync, warmup_end, measure_end):
+def note_timeline(timeline, wall_time, latency_us):
+    """Per-second step count and worst latency, warmup included.
+
+    Percentiles over a whole run hide a single stall. This shows when it happened,
+    so a neighbor's latency can be lined up against the moment of an eviction.
+    """
+    second = str(int(wall_time))
+    count, worst = timeline.get(second, (0, 0.0))
+    timeline[second] = (count + 1, max(worst, latency_us))
+
+
+def run_closed_loop(workload, sync, warmup_end, measure_end, timeline, wall_offset):
     latencies_us = []
     window_start = None
     while True:
@@ -133,6 +144,7 @@ def run_closed_loop(workload, sync, warmup_end, measure_end):
         workload.step()
         sync()
         end = time.perf_counter()
+        note_timeline(timeline, end + wall_offset, (end - begin) * 1e6)
         if begin >= warmup_end:
             window_start = window_start or begin
             latencies_us.append((end - begin) * 1e6)
@@ -308,7 +320,10 @@ def measure(args, size, result):
         latencies_us, window_start, result["overloaded"] = run_open_loop(
             workload, sync, warmup_end, measure_end, args.rate, args.seed)
     else:
-        latencies_us, window_start = run_closed_loop(workload, sync, warmup_end, measure_end)
+        timeline = {}
+        latencies_us, window_start = run_closed_loop(
+            workload, sync, warmup_end, measure_end, timeline, wall_offset)
+        result["timeline"] = {k: [v[0], round(v[1], 1)] for k, v in timeline.items()}
     finished = time.perf_counter()
 
     # Closed-loop steps overrun measure_end, so use the real elapsed window.

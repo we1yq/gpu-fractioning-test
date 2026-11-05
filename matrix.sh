@@ -63,7 +63,10 @@ runtime_cells() {
 
 capacity_cells() {
   echo "--tag cap-fair $PROBE -n 4 --hold-list 15000,15000,15000,15000 --stagger 5"
-  echo "--tag cap-hog $PROBE -n 3 --hold-list 38000,2000,1000 --stagger 5"
+  # Bystander first: it must already be measuring when the eviction happens.
+  # Order: bystander (1 GiB), greedy Pod (38 GiB), then the victim (2 GiB) that
+  # runs into the wall.
+  echo "--tag cap-hog $PROBE -n 3 --hold-list 1000,38000,2000 --stagger 6"
 }
 
 alloc_cells() {
