@@ -61,6 +61,20 @@ wait_for_no_mps() {
   return 1
 }
 
+# Helm returns before KAI's admission webhook has endpoints, and until then every Pod
+# in the cluster is rejected. A server-side dry run goes through the webhook.
+wait_for_admission() {
+  local i
+  for i in $(seq 1 60); do
+    if "$ROOT/run.sh" --dry-run --mode legacy --image "$IMAGE" --workload gemm \
+        | "$KUBECTL_BIN" apply --dry-run=server -f - >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
 fractioning_ready() {
   [[ "$(admin get gpufractioningconfigs -o 'jsonpath={.items[*].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" == *True* ]]
 }
@@ -85,6 +99,7 @@ restore() {
   else
     ok=0
   fi
+  wait_for_admission || { echo "warning: KAI admission webhook is not answering" >&2; ok=0; }
   if [[ "$ok" == 0 ]]; then
     echo "RESTORE INCOMPLETE. Check the steps above, then run:" >&2
     echo "  sudo $HELM upgrade kai-scheduler $KAI_CHART --version $KAI_VERSION --namespace kai-scheduler --kubeconfig $ADMIN_CONFIG -f $KAI_VALUES --wait --timeout 5m" >&2
@@ -117,6 +132,7 @@ kai_upgrade --set global.nvFractions.set=false --set global.gpuSharingMode=NonMe
 
 step "3/4 allowing hostPath in gpu-bench"
 admin label namespace gpu-bench pod-security.kubernetes.io/enforce=privileged --overwrite
+wait_for_admission || die "KAI admission webhook did not come back"
 
 step "4/4 starting the node MPS"
 sudo mkdir -p "$PIPE_DIR" "$LOG_DIR"
