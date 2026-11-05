@@ -6,11 +6,17 @@ summed; mean and stdev are then taken across repetitions.
 
 Note: the mean of per-Pod P99s is not the P99 of the merged distribution.
 
-Interference is relative to the same mode, config, workload and rate at n=1. That
-keeps MIG honest: a 1g.5gb slice is compared to itself alone, not to a whole GPU.
+Interference is relative to the same mode, config, workload and rate at n=1.
+
+Excess interference removes the expected fair share: when n closed-loop Pods share
+a GPU, each is expected to run n times slower, so `p50_excess` = 1.0 means pure
+sharing and anything above it is overhead or contention. It is only meaningful for
+homogeneous closed-loop cells, and left empty otherwise. `total_throughput_loss`
+is the fraction of solo throughput lost in total across those Pods.
 
 A repetition is excluded, and counted in `excluded_reps`, if any Pod failed to
-report, started late, or if the measured windows of the Pods do not overlap enough.
+report, started late, landed on a different GPU, or if the measured windows of the
+Pods do not overlap enough.
 Out-of-memory Pods are counted in `oom_pods`; they are results, not errors.
 
 Usage: summarize.py [results_dir] [-o summary.csv]
@@ -32,7 +38,7 @@ FIELDS = [
     "oom_pods", "overloaded_pods",
     "throughput_mean", "throughput_stdev", "p50_us_mean", "p50_us_stdev",
     "p99_us_mean", "p99_us_stdev", "p50_interference", "p99_interference",
-    "throughput_ratio",
+    "throughput_ratio", "p50_excess", "total_throughput_loss",
 ]
 
 
@@ -57,6 +63,9 @@ def load_rep(rep_dir):
     ok = [p for p in pods if p["status"] == "ok"]
     if any(p.get("late_start_s", 0) > MAX_LATE_S for p in ok):
         return meta, pods, "late start"
+    uuids = {p["environment"].get("gpu_uuid") for p in ok}
+    if len(uuids - {None}) > 1:
+        return meta, pods, "Pods landed on different GPUs"
     if len(ok) > 1 and window_overlap(ok) < MIN_OVERLAP:
         return meta, pods, "windows do not overlap"
     return meta, pods, None
@@ -116,6 +125,9 @@ def build_rows(cells):
             row["p50_interference"] = ratio(row.get("p50_us_mean"), base.get("p50_us_mean"))
             row["p99_interference"] = ratio(row.get("p99_us_mean"), base.get("p99_us_mean"))
             row["throughput_ratio"] = ratio(row.get("throughput_mean"), base.get("throughput_mean"))
+            if role == "peer" and not rate and row.get("p50_interference"):
+                row["p50_excess"] = row["p50_interference"] / n
+                row["total_throughput_loss"] = 1 - row["throughput_ratio"]
     return sorted(rows.values(), key=lambda r: tuple(str(r[f]) for f in FIELDS[:7]))
 
 

@@ -17,6 +17,7 @@ import os
 import platform
 import random
 import socket
+import subprocess
 import sys
 import time
 
@@ -26,7 +27,7 @@ from workloads import WORKLOADS
 
 RESULT_MARKER = "BENCH_RESULT "
 EXIT_OOM = 2
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Log-spaced histogram: 20 buckets per decade from 1 us up to about 1000 s.
 HIST_BUCKETS_PER_DECADE = 20
@@ -45,6 +46,10 @@ def parse_args(argv=None):
     p.add_argument("--start-at", type=float, help="unix time at which warmup begins")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda", help="cuda or cpu (cpu is for smoke tests only)")
+    p.add_argument("--cpu-threads", type=int, default=2,
+                   help="host threads; match the Pod CPU limit to avoid CFS throttling")
+    p.add_argument("--numa-node", type=int,
+                   help="pin to this NUMA node, ideally the one the GPU is attached to")
     p.add_argument("--role", default="solo", help="free-form label, e.g. victim or noisy")
     p.add_argument("--out", help="result path; default is a marker line on stdout")
     p.add_argument("--raw", action="store_true", help="also store every latency sample")
@@ -159,6 +164,43 @@ def run_open_loop(workload, sync, warmup_end, measure_end, rate, seed):
     return latencies_us, window_start, overloaded
 
 
+def parse_cpulist(text):
+    """Expand a kernel cpulist such as '0,2,4-6' into a set of CPU numbers."""
+    cpus = set()
+    for part in text.strip().split(","):
+        if part:
+            first, _, last = part.partition("-")
+            cpus.update(range(int(first), int(last or first) + 1))
+    return cpus
+
+
+def pin_to_numa_node(node):
+    """Best effort. Returns the CPUs in use, or None if pinning was not possible."""
+    if not hasattr(os, "sched_setaffinity"):
+        return None
+    try:
+        with open(f"/sys/devices/system/node/node{node}/cpulist") as f:
+            wanted = parse_cpulist(f.read())
+        allowed = wanted & os.sched_getaffinity(0)
+        if allowed:
+            os.sched_setaffinity(0, allowed)
+            return sorted(allowed)
+    except OSError as e:
+        print(f"NUMA pinning failed: {e}", file=sys.stderr)
+    return None
+
+
+def gpu_uuid():
+    """Identifies the physical GPU, so a run that spans two GPUs can be rejected."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=30, check=True)
+        return out.stdout.split()[0]
+    except (OSError, IndexError, subprocess.SubprocessError) as e:
+        print(f"could not read GPU UUID: {e}", file=sys.stderr)
+        return None
+
+
 def environment(device):
     info = {
         "hostname": socket.gethostname(),
@@ -172,6 +214,7 @@ def environment(device):
     if device.startswith("cuda"):
         free, total = torch.cuda.mem_get_info()
         info["gpu_name"] = torch.cuda.get_device_name()
+        info["gpu_uuid"] = gpu_uuid()
         info["gpu_mem_visible_bytes"] = total
         info["gpu_mem_free_at_start_bytes"] = free
     return info
@@ -248,8 +291,15 @@ def main(argv=None):
         print("--rate must be >= 0", file=sys.stderr)
         return 1
 
+    # Before any allocation, so host memory lands on the pinned node.
+    pinned_cpus = pin_to_numa_node(args.numa_node) if args.numa_node is not None else None
+    torch.set_num_threads(args.cpu_threads)
+
     size = args.size or WORKLOADS[args.workload].default_size
     result = base_result(args, size)
+    result["numa_node"] = args.numa_node
+    result["numa_pinned"] = pinned_cpus is not None
+    result["cpu_threads"] = args.cpu_threads
     exit_code = 0
     try:
         measure(args, size, result)

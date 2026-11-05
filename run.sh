@@ -5,7 +5,7 @@
 #            --image IMAGE --workload gemm -n 2 --reps 5
 #
 # Interference (Pod 0 is the victim, the other n-1 Pods run --noisy):
-#   ./run.sh ... --workload smallkernel --rate 200 --noisy gemm -n 4
+#   ./run.sh ... --workload smallkernel --rate 5000 --noisy gemm -n 4
 #
 # This script only creates its own Pods and one ConfigMap. It never changes
 # GpuFractioningConfig, the device plugin, Helm releases or MIG partitions.
@@ -23,7 +23,7 @@ read -r -a KUBE <<<"${KUBECTL:-$DEFAULT_KUBECTL}"
 MODE="" COMPUTE="time-slicing" IMAGE="" WORKLOAD="" NOISY="" SIZE="" RATE=0
 COUNT=1 REPS=5 DURATION=60 WARMUP=10 SLACK=120 COOLDOWN=10 TIMEOUT=600
 GPU_MEMORY="4Gi" MIG_PROFILE="" CPU=2 QUEUE="default-queue" NAMESPACE="gpu-bench"
-RESULTS="$ROOT/results" CONFIRMED=0 DRY_RUN=0
+RESULTS="$ROOT/results" CONFIRMED=0 DRY_RUN=0 RESUME=0 ONLY_REP="" NUMA_NODE=0
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -49,6 +49,9 @@ while [[ $# -gt 0 ]]; do
     --queue) QUEUE="$2"; shift 2 ;;
     --namespace) NAMESPACE="$2"; shift 2 ;;
     --results) RESULTS="$2"; shift 2 ;;
+    --only-rep) ONLY_REP="$2"; shift 2 ;;    # run just this repetition number
+    --numa-node) NUMA_NODE="$2"; shift 2 ;;  # node the GPUs are attached to
+    --resume) RESUME=1; shift ;;             # skip finished reps, set aside partial ones
     --gpu-confirmed) CONFIRMED=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     *) die "unknown argument: $1" ;;
@@ -97,7 +100,8 @@ pod_args() { # index start_at seed
     role="peer"
   fi
   local args=(--workload "$workload" --role "$role" --seed "$3" --start-at "$2"
-              --duration "$DURATION" --warmup "$WARMUP" --rate "$rate")
+              --duration "$DURATION" --warmup "$WARMUP" --rate "$rate"
+              --cpu-threads "$CPU" --numa-node "$NUMA_NODE")
   [[ -z "$SIZE" || "$workload" != "$WORKLOAD" ]] || args+=(--size "$SIZE")
   printf '['
   local sep=""
@@ -105,7 +109,28 @@ pod_args() { # index start_at seed
   printf ']'
 }
 
+TELEMETRY_PIDS=()
+
+start_telemetry() { # dir
+  command -v nvidia-smi >/dev/null || return 0
+  # sm/mem utilization, clocks, power, temperature and PCIe throughput per second.
+  nvidia-smi dmon -s puct -d 1 -o DT >"$1/dmon.txt" 2>&1 &
+  TELEMETRY_PIDS+=($!)
+  # Which limit, if any, is holding the clocks down.
+  nvidia-smi --query-gpu=timestamp,uuid,clocks.sm,power.draw,clocks_event_reasons.active \
+    --format=csv,noheader -l 1 >"$1/clocks.csv" 2>&1 &
+  TELEMETRY_PIDS+=($!)
+}
+
+stop_telemetry() {
+  [[ ${#TELEMETRY_PIDS[@]} -gt 0 ]] || return 0
+  kill "${TELEMETRY_PIDS[@]}" 2>/dev/null || true
+  wait "${TELEMETRY_PIDS[@]}" 2>/dev/null || true
+  TELEMETRY_PIDS=()
+}
+
 cleanup() {
+  stop_telemetry
   [[ -n "${ACTIVE_RUN:-}" ]] || return 0
   "${KUBE[@]}" delete pods -n "$NAMESPACE" -l "bench-run=$ACTIVE_RUN" --ignore-not-found --wait=false >/dev/null || true
 }
@@ -156,10 +181,26 @@ fi
   --from-file="$ROOT/bench/bench.py" --from-file="$ROOT/bench/workloads.py" \
   --dry-run=client -o yaml | "${KUBE[@]}" apply -f - >/dev/null
 
-for ((rep = 1; rep <= REPS; rep++)); do
+FIRST_REP=1 LAST_REP="$REPS" FAILED=0
+if [[ -n "$ONLY_REP" ]]; then FIRST_REP="$ONLY_REP" LAST_REP="$ONLY_REP"; fi
+
+reported_pods() { # dir
+  find "$1" -maxdepth 1 -name 'gpu-bench-*.json' | wc -l | tr -d ' '
+}
+
+for ((rep = FIRST_REP; rep <= LAST_REP; rep++)); do
   run_id="gpu-bench-$(date +%Y%m%d%H%M%S)-$rep"
   dir="$RESULTS/$CELL/rep$rep"
-  [[ ! -e "$dir" ]] || die "$dir already exists; use another --results directory"
+  if [[ -e "$dir" ]]; then
+    [[ "$RESUME" == 1 ]] || die "$dir already exists; use --resume or another --results directory"
+    if [[ "$(reported_pods "$dir")" -eq "$COUNT" ]]; then
+      echo "[$CELL rep $rep] already finished, skipping"
+      continue
+    fi
+    # Kept outside --results so summarize.py does not see the partial run.
+    mkdir -p "$RESULTS.incomplete"
+    mv "$dir" "$RESULTS.incomplete/$(echo "$CELL" | tr '/+@' '___')-rep$rep-$run_id"
+  fi
   mkdir -p "$dir"
   start_at=$(( $(date +%s) + SLACK ))
 
@@ -172,6 +213,7 @@ EOF
   fi
 
   ACTIVE_RUN="$run_id"
+  start_telemetry "$dir"
   for ((i = 0; i < COUNT; i++)); do
     # Seeds depend on rep and index only, so every config sees identical input.
     render_pod "$run_id-$i" "$run_id" "$(pod_args "$i" "$start_at" "$((rep * 1000 + i))")" \
@@ -183,5 +225,8 @@ EOF
   for ((i = 0; i < COUNT; i++)); do collect_pod "$run_id-$i" "$dir"; done
   cleanup
   ACTIVE_RUN=""
-  [[ "$rep" -eq "$REPS" ]] || sleep "$COOLDOWN"
+  [[ "$(reported_pods "$dir")" -eq "$COUNT" ]] || FAILED=1
+  sleep "$COOLDOWN"
 done
+
+exit "$FAILED"

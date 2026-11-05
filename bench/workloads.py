@@ -5,6 +5,7 @@ Each workload isolates one source of contention so results can be attributed:
   gemm         SM contention        (large dense matrix multiply)
   membw        memory bandwidth     (STREAM-style copy + triad on large tensors)
   smallkernel  scheduling overhead  (tiny kernels, one per step, high frequency)
+  hostcopy     PCIe                 (host <-> device copies, no compute)
 
 A workload allocates everything up front, so an out-of-memory condition shows up
 during setup rather than in the middle of the measured window. `step()` submits
@@ -76,4 +77,22 @@ class SmallKernel(Workload):
         torch.mm(self.a, self.b, out=self.out)
 
 
-WORKLOADS = {"gemm": Gemm, "membw": MemBw, "smallkernel": SmallKernel}
+class HostCopy(Workload):
+    """size = MiB per direction. The only workload that crosses PCIe for its data."""
+
+    default_size = 256
+
+    def __init__(self, size, device, seed):
+        super().__init__(size, device, seed)
+        elements = size * 1024 * 1024 // 4
+        self.device_buffer = torch.empty(elements, dtype=torch.float32, device=device)
+        self.host_buffer = torch.randn(elements, generator=self.generator, dtype=torch.float32)
+        if str(device).startswith("cuda"):
+            self.host_buffer = self.host_buffer.pin_memory()
+
+    def step(self):
+        self.device_buffer.copy_(self.host_buffer)
+        self.host_buffer.copy_(self.device_buffer)
+
+
+WORKLOADS = {"gemm": Gemm, "hostcopy": HostCopy, "membw": MemBw, "smallkernel": SmallKernel}

@@ -51,7 +51,8 @@ current-context: gpu-bench
 EOF
 chmod 600 "$OUT"
 
-check() { # expected verb resource [namespace flag...]
+# Subresources need --subresource: `can-i create pods/exec` means a Pod named exec.
+check() { # expected verb resource [flags...]
   local expected="$1"; shift
   local actual
   actual="$("$BIN" auth can-i "$@" 2>/dev/null || true)"
@@ -61,10 +62,10 @@ check() { # expected verb resource [namespace flag...]
 
 FAILED=0
 check yes create pods -n "$NS"
-check yes get pods/log -n "$NS"
+check yes get pods --subresource=log -n "$NS"
 check yes create configmaps -n "$NS"
 check yes get gpufractioningconfigs.gpu-fractioning.kai.scheduler
-check no create pods/exec -n "$NS"
+check no create pods --subresource=exec -n "$NS"
 check no create pods -n kube-system
 check no delete gpufractioningconfigs.gpu-fractioning.kai.scheduler
 check no get secrets -n "$NS"

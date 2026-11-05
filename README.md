@@ -18,6 +18,7 @@ analyze/    汇总 P50/P99 和干扰系数（作图待第 5 步补充）
 | `gemm` | SM 竞争 | 4096 × 4096 | 约 192 MiB |
 | `membw` | 显存带宽 | 每个数组 680 MiB | 约 2 GiB |
 | `smallkernel` | 调度开销 | 256 × 256 | 很小 |
+| `hostcopy` | PCIe | 每个方向 256 MiB | 约 256 MiB |
 
 默认规模要能放进最小的切片（`1g.5gb`），这样所有配置跑的都是同一负载。
 正式实验前，先单独校准一次 `--size`。
@@ -47,15 +48,22 @@ SSH 断开时 `run.sh` 会退出。
 ./run.sh --gpu-confirmed --mode fractioning --compute time-slicing \
   --image IMAGE --workload gemm -n 2 --reps 5
 
-# 异构干扰：Pod 0 是受害者，开环 200 请求/秒，其余 3 个是吵闹邻居
+# 异构干扰：Pod 0 是受害者，开环 5000 请求/秒，其余 3 个是吵闹邻居
 ./run.sh --gpu-confirmed --mode fractioning --compute sm-sharing \
-  --image IMAGE --workload smallkernel --rate 200 --noisy gemm -n 4 --reps 5
+  --image IMAGE --workload smallkernel --rate 5000 --noisy gemm -n 4 --reps 5
 
 # MIG：分区必须已存在
 ./run.sh --gpu-confirmed --mode mig --mig-profile 3g.20gb \
   --image IMAGE --workload gemm -n 2 --reps 5
 
 python3 analyze/summarize.py results -o results/summary.csv
+```
+
+完整矩阵用 `matrix.sh`，在 `tmux` 里运行。用相同的 `--results` 重跑就能续跑：
+
+```bash
+./matrix.sh --list
+./matrix.sh --gpu-confirmed --image IMAGE --results results/fractioning-v1 --reps 1
 ```
 
 `run.sh` 只创建自己的 Pod 和一个 ConfigMap，不会改动 `GpuFractioningConfig`、
@@ -72,8 +80,18 @@ device plugin、Helm Release 或 MIG 分区。代码通过 ConfigMap 挂载，
 - **相同输入**：种子只由轮次和 Pod 序号决定，各配置看到的输入相同。
 - **独占 CPU**：`synchronize()` 会占满一个核，模板里 CPU 的 request 等于 limit，
   避免把 CPU 争用误判成 GPU 争用。
-- **干扰系数**：相对同一配置、同一切片的 n=1 基线。MIG 切片和自己比，不和整卡比。
-  跨模式的开销比较，用各模式 n=1 的结果。
+- **干扰系数**：相对同一配置的 n=1 基线。跨模式的开销比较，用各模式 n=1 的结果。
+- **额外退化**：`p50_excess` 扣除公平份额，n 个 Pod 平分 GPU 时为 1.0，超出部分才是
+  开销或争用。
+- **定位干扰来源**：交叉矩阵让每个负载既当受害者又当邻居。比如 `hostcopy` 只被
+  `hostcopy` 拖慢，说明争用在 PCIe。`time-slicing` 下 Pod 轮流占用 GPU，这种区分
+  主要在 `sm-sharing` 下有效。
+- **遥测**：每轮保存 `dmon.txt`（SM%、内存控制器、PCIe、时钟、功耗）和
+  `clocks.csv`（降频原因）。`dcgmi` 的 SM/DRAM 指标在 MPS 开启时读取失败，
+  内存控制器忙碌度只是显存带宽的代理指标。
+- **同一张卡**：每个 Pod 记录 GPU UUID，不一致的整轮会被剔除。
+- **CPU 位置**：Pod 固定到 GPU 所在的 NUMA 0，线程数等于 CPU 配额，避免跨插槽和
+  CFS 限流影响延迟。
 
 ## 结果
 
