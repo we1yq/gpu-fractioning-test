@@ -17,7 +17,8 @@ is the fraction of solo throughput lost in total across those Pods.
 A repetition is excluded, and counted in `excluded_reps`, if any Pod failed to
 report, started late, landed on a different GPU, or if the measured windows of the
 Pods do not overlap enough.
-Out-of-memory Pods are counted in `oom_pods`; they are results, not errors.
+Out-of-memory Pods are counted in `oom_pods`; they are results, not errors. So are
+`starved_pods`, which ran but completed nothing inside the measured window.
 
 Usage: summarize.py [results_dir] [-o summary.csv]
 """
@@ -35,7 +36,7 @@ MAX_LATE_S = 0.0
 
 FIELDS = [
     "mode", "config", "workload", "noisy", "rate", "n", "role", "reps", "excluded_reps",
-    "oom_pods", "overloaded_pods",
+    "oom_pods", "overloaded_pods", "starved_pods",
     "throughput_mean", "throughput_stdev", "p50_us_mean", "p50_us_stdev",
     "p99_us_mean", "p99_us_stdev", "p50_interference", "p99_interference",
     "throughput_ratio", "p50_excess", "total_throughput_loss",
@@ -58,9 +59,11 @@ def load_rep(rep_dir):
         if path.name != "meta.json":
             pods.append(json.loads(path.read_text()))
 
+    if meta.get("tag", "").startswith("cap"):
+        return meta, pods, "capacity run, see analyze/capacity.py"
     if len(pods) != meta["n"]:
         return meta, pods, f"{len(pods)} of {meta['n']} Pods reported"
-    ok = [p for p in pods if p["status"] == "ok"]
+    ok = [p for p in pods if p["status"] == "ok" and p["summary"]["count"]]
     if any(p.get("late_start_s", 0) > MAX_LATE_S for p in ok):
         return meta, pods, "late start"
     uuids = {p["environment"].get("gpu_uuid") for p in ok}
@@ -72,10 +75,14 @@ def load_rep(rep_dir):
 
 
 def collect(results_dir):
-    cells = defaultdict(lambda: {"reps": defaultdict(list), "excluded": 0, "oom": 0, "overloaded": 0})
+    cells = defaultdict(lambda: {"reps": defaultdict(list), "excluded": 0, "oom": 0,
+                                 "overloaded": 0, "starved": 0})
     for meta_path in sorted(results_dir.rglob("meta.json")):
         meta, pods, reason = load_rep(meta_path.parent)
-        cell_key = (meta["mode"], meta["config"], meta["workload"], meta["noisy"], meta["rate"], meta["n"])
+        if meta.get("tag", "").startswith("cap"):
+            continue
+        workload = "-".join(filter(None, (meta.get("tag"), meta["workload"], meta.get("size"))))
+        cell_key = (meta["mode"], meta["config"], workload, meta["noisy"], meta["rate"], meta["n"])
         roles = {p["role"] for p in pods} or {"unknown"}
         if reason:
             print(f"excluded {meta_path.parent}: {reason}", file=sys.stderr)
@@ -87,7 +94,8 @@ def collect(results_dir):
                 continue
             cell["oom"] += sum(p["status"] == "oom" for p in role_pods)
             cell["overloaded"] += sum(bool(p.get("overloaded")) for p in role_pods)
-            ok = [p["summary"] for p in role_pods if p["status"] == "ok"]
+            ok = [p["summary"] for p in role_pods if p["status"] == "ok" and p["summary"]["count"]]
+            cell["starved"] += sum(p["status"] == "ok" and not p["summary"]["count"] for p in role_pods)
             if ok:
                 cell["reps"][meta["rep"]] = ok
     return cells
@@ -107,7 +115,8 @@ def build_rows(cells):
         mode, config, workload, noisy, rate, n, role = key
         row = dict(zip(FIELDS, (mode, config, workload, noisy, rate, n, role)))
         row.update(reps=len(cell["reps"]), excluded_reps=cell["excluded"],
-                   oom_pods=cell["oom"], overloaded_pods=cell["overloaded"])
+                   oom_pods=cell["oom"], overloaded_pods=cell["overloaded"],
+                   starved_pods=cell["starved"])
         reps = list(cell["reps"].values())
         if reps:
             row["throughput_mean"], row["throughput_stdev"] = spread(

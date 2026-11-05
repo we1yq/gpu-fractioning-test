@@ -6,6 +6,7 @@ Each workload isolates one source of contention so results can be attributed:
   membw        memory bandwidth     (STREAM-style copy + triad on large tensors)
   smallkernel  scheduling overhead  (tiny kernels, one per step, high frequency)
   hostcopy     PCIe                 (host <-> device copies, no compute)
+  alloccycle   allocation path      (allocate, touch and free device memory)
 
 A workload allocates everything up front, so an out-of-memory condition shows up
 during setup rather than in the middle of the measured window. `step()` submits
@@ -95,4 +96,32 @@ class HostCopy(Workload):
         self.host_buffer.copy_(self.device_buffer)
 
 
-WORKLOADS = {"gemm": Gemm, "hostcopy": HostCopy, "membw": MemBw, "smallkernel": SmallKernel}
+class AllocCycle(Workload):
+    """size = MiB per cycle. Measures the allocation path, not the GPU kernels.
+
+    empty_cache() matters: without it PyTorch reuses its own cache and the
+    allocation never reaches the driver, which is where limits are checked.
+    """
+
+    default_size = 64
+
+    def __init__(self, size, device, seed):
+        super().__init__(size, device, seed)
+        self.elements = size * 1024 * 1024 // 4
+        self.is_cuda = str(device).startswith("cuda")
+
+    def step(self):
+        buffer = torch.empty(self.elements, dtype=torch.float32, device=self.device)
+        buffer.fill_(1.0)
+        del buffer
+        if self.is_cuda:
+            torch.cuda.empty_cache()
+
+
+WORKLOADS = {
+    "alloccycle": AllocCycle,
+    "gemm": Gemm,
+    "hostcopy": HostCopy,
+    "membw": MemBw,
+    "smallkernel": SmallKernel,
+}

@@ -7,7 +7,8 @@ windows overlap; the result records the actual window so analysis can verify it.
 The result is written to --out, or otherwise printed to stdout as a single line
 prefixed with RESULT_MARKER, which lets run.sh recover it from `kubectl logs`.
 
-Exit codes: 0 ok, 2 out of memory (matches the smoke-test convention).
+Exit codes: 0 ok, 2 out of memory (matches the smoke-test convention), 3 GPU error
+during the run, such as being terminated by MPS eviction.
 """
 
 import argparse
@@ -27,7 +28,9 @@ from workloads import WORKLOADS
 
 RESULT_MARKER = "BENCH_RESULT "
 EXIT_OOM = 2
-SCHEMA_VERSION = 2
+EXIT_GPU_ERROR = 3
+SCHEMA_VERSION = 3
+HOLD_CHUNK_MIB = 256
 
 # Log-spaced histogram: 20 buckets per decade from 1 us up to about 1000 s.
 HIST_BUCKETS_PER_DECADE = 20
@@ -51,6 +54,8 @@ def parse_args(argv=None):
     p.add_argument("--numa-node", type=int,
                    help="pin to this NUMA node, ideally the one the GPU is attached to")
     p.add_argument("--role", default="solo", help="free-form label, e.g. victim or noisy")
+    p.add_argument("--hold-mib", type=int, default=0,
+                   help="occupy this much device memory first, as far as it will go")
     p.add_argument("--out", help="result path; default is a marker line on stdout")
     p.add_argument("--raw", action="store_true", help="also store every latency sample")
     return p.parse_args(argv)
@@ -158,8 +163,10 @@ def run_open_loop(workload, sync, warmup_end, measure_end, rate, seed):
         workload.step()
         sync()
         end = time.perf_counter()
-        if scheduled >= warmup_end:
-            window_start = window_start or scheduled
+        # By completion time, not arrival: an overloaded victim may never work
+        # through its warmup backlog, and its achieved rate is still a result.
+        if end >= warmup_end:
+            window_start = window_start or warmup_end
             latencies_us.append((end - scheduled) * 1e6)
     return latencies_us, window_start, overloaded
 
@@ -246,19 +253,47 @@ def emit(result, out_path):
         print(RESULT_MARKER + payload, flush=True)
 
 
+def hold_memory(target_mib, device):
+    """Occupy device memory in chunks. Returns the chunks, and whether it fell short.
+
+    Filling each chunk makes it real on the device. Falling short is a result of
+    the capacity experiments, so the run carries on with what it got.
+    """
+    chunks = []
+    elements = HOLD_CHUNK_MIB * 1024 * 1024 // 4
+    try:
+        for _ in range(target_mib // HOLD_CHUNK_MIB):
+            chunk = torch.empty(elements, dtype=torch.float32, device=device)
+            chunk.fill_(1.0)
+            chunks.append(chunk)
+    except torch.cuda.OutOfMemoryError:
+        if device.startswith("cuda"):
+            torch.cuda.empty_cache()
+        return chunks, True
+    return chunks, False
+
+
 def measure(args, size, result):
     sync = make_sync(args.device)
+
+    # After the shared start time, so staggered Pods reach for memory in order.
+    wait_s = args.start_at - time.time() if args.start_at is not None else 0.0
+    if wait_s > 0:
+        time.sleep(wait_s)
+    result["late_start_s"] = max(-wait_s, 0.0)
+
+    held, fell_short = hold_memory(args.hold_mib, args.device)
+    result["hold_target_mib"] = args.hold_mib
+    result["held_mib"] = len(held) * HOLD_CHUNK_MIB
+    result["hold_fell_short"] = fell_short
+    result["held_at_unix"] = time.time()
+
     workload = WORKLOADS[args.workload](size, args.device, args.seed)
 
     # One step outside the window, so lazy initialization is not counted as
     # warmup that overruns a concurrent peer's start.
     workload.step()
     sync()
-
-    wait_s = args.start_at - time.time() if args.start_at is not None else 0.0
-    if wait_s > 0:
-        time.sleep(wait_s)
-    result["late_start_s"] = max(-wait_s, 0.0)
 
     # Time.time() is shared between Pods on a node; perf_counter() is not.
     wall_offset = time.time() - time.perf_counter()
@@ -307,8 +342,14 @@ def main(argv=None):
         result["status"] = "oom"
         result["error"] = str(e)
         exit_code = EXIT_OOM
+    except RuntimeError as e:
+        # For example CUDA_ERROR_MPS_CLIENT_TERMINATED after eviction.
+        result["status"] = "gpu_error"
+        result["error"] = str(e)
+        result["error_at_unix"] = time.time()
+        exit_code = EXIT_GPU_ERROR
 
-    if args.device.startswith("cuda"):
+    if args.device.startswith("cuda") and result["status"] != "gpu_error":
         result["gpu_max_allocated_bytes"] = torch.cuda.max_memory_allocated()
         result["gpu_max_reserved_bytes"] = torch.cuda.max_memory_reserved()
     emit(result, args.out)

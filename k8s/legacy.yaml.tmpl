@@ -1,0 +1,37 @@
+# Group C: traditional MPS as in KAI's docs/gpu-sharing/mps. KAI places the Pod by
+# gpu-fraction without enforcing memory, and the Pod reaches a node-level MPS through
+# the mounted pipe directory. Needs k8s/run-legacy-group.sh to set up the node.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: __NAME__
+  namespace: __NAMESPACE__
+  labels:
+    app: gpu-bench
+    bench-run: __RUN_ID__
+    kai.scheduler/queue: __QUEUE__
+  annotations:
+    gpu-fraction: "__GPU_FRACTION__"
+spec:
+  schedulerName: kai-scheduler
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  containers:
+    - name: bench
+      image: __IMAGE__
+      command: ["python3", "/bench/bench.py"]
+      args: __ARGS__
+      env:
+        - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+        - {name: CUDA_MPS_PIPE_DIRECTORY, value: /tmp/nvidia-mps}
+      resources:
+        requests: {cpu: "__CPU__", memory: 8Gi}
+        limits: {cpu: "__CPU__", memory: 8Gi}
+      volumeMounts:
+        - {name: bench-code, mountPath: /bench, readOnly: true}
+        - {name: mps, mountPath: /tmp/nvidia-mps}
+  volumes:
+    - name: bench-code
+      configMap: {name: __CONFIGMAP__}
+    - name: mps
+      hostPath: {path: /tmp/nvidia-mps, type: Directory}

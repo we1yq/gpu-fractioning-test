@@ -4,8 +4,15 @@
 #   ./run.sh --gpu-confirmed --mode fractioning --compute time-slicing \
 #            --image IMAGE --workload gemm -n 2 --reps 5
 #
+# Modes: fractioning (groups A and B, chosen by --gpu-limit) and legacy (group C:
+# KAI NonMemoryEnforced with a node-level MPS, see k8s/run-legacy-group.sh).
+#
+# Capacity experiments give each Pod its own memory target and a staggered start:
+#   ./run.sh ... --workload gemm --size 2048 -n 3 --tag cap-hog \
+#                --hold-list 38000,2000,1000 --stagger 5
+#
 # Interference (Pod 0 is the victim, the other n-1 Pods run --noisy):
-#   ./run.sh ... --workload smallkernel --rate 5000 --noisy gemm -n 4
+#   ./run.sh ... --workload smallkernel --rate 100 --noisy gemm -n 4
 #
 # This script only creates its own Pods and one ConfigMap. It never changes
 # GpuFractioningConfig, the device plugin, Helm releases or MIG partitions.
@@ -20,7 +27,8 @@ DEFAULT_KUBECTL=kubectl
 [[ ! -x /var/lib/rancher/rke2/bin/kubectl ]] || DEFAULT_KUBECTL=/var/lib/rancher/rke2/bin/kubectl
 read -r -a KUBE <<<"${KUBECTL:-$DEFAULT_KUBECTL}"
 
-MODE="" COMPUTE="time-slicing" IMAGE="" WORKLOAD="" NOISY="" SIZE="" RATE=0
+MODE="" COMPUTE="sm-sharing" IMAGE="" WORKLOAD="" NOISY="" SIZE="" NOISY_SIZE="" RATE=0
+TAG="" HOLD_LIST="" STAGGER=0 GPU_LIMIT="" GPU_FRACTION="0.25"
 COUNT=1 REPS=5 DURATION=60 WARMUP=10 SLACK=120 COOLDOWN=10 TIMEOUT=600
 GPU_MEMORY="4Gi" MIG_PROFILE="" CPU=2 QUEUE="default-queue" NAMESPACE="gpu-bench"
 RESULTS="$ROOT/results" CONFIRMED=0 DRY_RUN=0 RESUME=0 ONLY_REP="" NUMA_NODE=0
@@ -34,6 +42,12 @@ while [[ $# -gt 0 ]]; do
     --image) IMAGE="$2"; shift 2 ;;
     --workload) WORKLOAD="$2"; shift 2 ;;
     --noisy) NOISY="$2"; shift 2 ;;
+    --noisy-size) NOISY_SIZE="$2"; shift 2 ;;
+    --tag) TAG="$2"; shift 2 ;;              # scenario name, part of the result path
+    --hold-list) HOLD_LIST="$2"; shift 2 ;;  # MiB per Pod, comma separated
+    --stagger) STAGGER="$2"; shift 2 ;;      # seconds between Pod start times
+    --gpu-limit) GPU_LIMIT="$2"; shift 2 ;;  # defaults to --gpu-memory
+    --gpu-fraction) GPU_FRACTION="$2"; shift 2 ;;  # legacy mode only
     --size) SIZE="$2"; shift 2 ;;
     --rate) RATE="$2"; shift 2 ;;            # open-loop rate of Pod 0 (or all, if no --noisy)
     -n) COUNT="$2"; shift 2 ;;
@@ -61,14 +75,16 @@ done
 case "$MODE" in
   fractioning)
     [[ "$COMPUTE" == time-slicing || "$COMPUTE" == sm-sharing ]] || die "bad --compute: $COMPUTE"
-    CONFIG="$COMPUTE-$GPU_MEMORY"
+    [[ -n "$GPU_LIMIT" ]] || GPU_LIMIT="$GPU_MEMORY"
+    CONFIG="$COMPUTE-$GPU_MEMORY-$GPU_LIMIT"
     ;;
+  legacy) CONFIG="fraction-$GPU_FRACTION" ;;
   mps) CONFIG="default" ;;
   mig)
     [[ -n "$MIG_PROFILE" ]] || die "--mode mig needs --mig-profile"
     CONFIG="$MIG_PROFILE"
     ;;
-  *) die "--mode must be fractioning, mps or mig" ;;
+  *) die "--mode must be fractioning, legacy, mps or mig" ;;
 esac
 [[ -n "$IMAGE" ]] || die "--image is required"
 [[ -n "$WORKLOAD" ]] || die "--workload is required"
@@ -80,10 +96,11 @@ fi
 TEMPLATE="$ROOT/k8s/$MODE.yaml.tmpl"
 RATE_TAG=""
 [[ "$RATE" == 0 ]] || RATE_TAG="@$RATE"
-CELL="$MODE-$CONFIG/$WORKLOAD$RATE_TAG${NOISY:++$NOISY}/n$COUNT"
+CELL="$MODE-$CONFIG/${TAG:+$TAG-}$WORKLOAD${SIZE:+-$SIZE}$RATE_TAG${NOISY:++$NOISY}${NOISY_SIZE:+-$NOISY_SIZE}/n$COUNT"
 
 render_pod() { # name run_id args_json
   sed -e "s|__COMPUTE_MODE__|$COMPUTE|" \
+      -e "s|__GPU_LIMIT__|$GPU_LIMIT|g; s|__GPU_FRACTION__|$GPU_FRACTION|g" \
       -e "s|__NAME__|$1|; s|__RUN_ID__|$2|; s|__ARGS__|$3|" \
       -e "s|__IMAGE__|$IMAGE|; s|__NAMESPACE__|$NAMESPACE|; s|__QUEUE__|$QUEUE|" \
       -e "s|__GPU_MEMORY__|$GPU_MEMORY|g; s|__MIG_PROFILE__|$MIG_PROFILE|g" \
@@ -102,7 +119,16 @@ pod_args() { # index start_at seed
   local args=(--workload "$workload" --role "$role" --seed "$3" --start-at "$2"
               --duration "$DURATION" --warmup "$WARMUP" --rate "$rate"
               --cpu-threads "$CPU" --numa-node "$NUMA_NODE")
-  [[ -z "$SIZE" || "$workload" != "$WORKLOAD" ]] || args+=(--size "$SIZE")
+  if [[ "$role" == noisy ]]; then
+    [[ -z "$NOISY_SIZE" ]] || args+=(--size "$NOISY_SIZE")
+  else
+    [[ -z "$SIZE" ]] || args+=(--size "$SIZE")
+  fi
+  if [[ -n "$HOLD_LIST" ]]; then
+    local holds
+    IFS=, read -r -a holds <<<"$HOLD_LIST"
+    args+=(--hold-mib "${holds[$1]:-0}")
+  fi
   printf '['
   local sep=""
   for a in "${args[@]}"; do printf '%s"%s"' "$sep" "$a"; sep=", "; done
@@ -184,8 +210,9 @@ fi
 FIRST_REP=1 LAST_REP="$REPS" FAILED=0
 if [[ -n "$ONLY_REP" ]]; then FIRST_REP="$ONLY_REP" LAST_REP="$ONLY_REP"; fi
 
+# A Pod killed by eviction leaves no JSON, but its exit code is still a result.
 reported_pods() { # dir
-  find "$1" -maxdepth 1 -name 'gpu-bench-*.json' | wc -l | tr -d ' '
+  find "$1" -maxdepth 1 -name 'gpu-bench-*.exit' -size +0c | wc -l | tr -d ' '
 }
 
 for ((rep = FIRST_REP; rep <= LAST_REP; rep++)); do
@@ -206,7 +233,8 @@ for ((rep = FIRST_REP; rep <= LAST_REP; rep++)); do
 
   cat >"$dir/meta.json" <<EOF
 {"mode": "$MODE", "config": "$CONFIG", "workload": "$WORKLOAD", "noisy": "$NOISY", "rate": $RATE,
- "n": $COUNT, "rep": $rep, "run_id": "$run_id", "image": "$IMAGE", "start_at": $start_at}
+ "n": $COUNT, "rep": $rep, "run_id": "$run_id", "image": "$IMAGE", "start_at": $start_at,
+ "tag": "$TAG", "stagger": $STAGGER, "hold_list": "$HOLD_LIST", "size": "$SIZE", "noisy_size": "$NOISY_SIZE"}
 EOF
   if [[ "$MODE" == fractioning ]]; then
     "${KUBE[@]}" get gpufractioningconfigs -o yaml >"$dir/gpufractioningconfig.yaml"
@@ -216,7 +244,7 @@ EOF
   start_telemetry "$dir"
   for ((i = 0; i < COUNT; i++)); do
     # Seeds depend on rep and index only, so every config sees identical input.
-    render_pod "$run_id-$i" "$run_id" "$(pod_args "$i" "$start_at" "$((rep * 1000 + i))")" \
+    render_pod "$run_id-$i" "$run_id" "$(pod_args "$i" "$((start_at + i * STAGGER))" "$((rep * 1000 + i))")" \
       | "${KUBE[@]}" apply -f - >/dev/null
   done
 

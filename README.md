@@ -19,6 +19,7 @@ analyze/    汇总 P50/P99 和干扰系数（作图待第 5 步补充）
 | `membw` | 显存带宽 | 每个数组 680 MiB | 约 2 GiB |
 | `smallkernel` | 调度开销 | 256 × 256 | 很小 |
 | `hostcopy` | PCIe | 每个方向 256 MiB | 约 256 MiB |
+| `alloccycle` | 分配路径 | 每次 64 MiB | 约 64 MiB |
 
 默认规模要能放进最小的切片（`1g.5gb`），这样所有配置跑的都是同一负载。
 正式实验前，先单独校准一次 `--size`。
@@ -48,9 +49,9 @@ SSH 断开时 `run.sh` 会退出。
 ./run.sh --gpu-confirmed --mode fractioning --compute time-slicing \
   --image IMAGE --workload gemm -n 2 --reps 5
 
-# 异构干扰：Pod 0 是受害者，开环 5000 请求/秒，其余 3 个是吵闹邻居
+# 异构干扰：Pod 0 是受害者，开环 100 请求/秒，其余 3 个是吵闹邻居
 ./run.sh --gpu-confirmed --mode fractioning --compute sm-sharing \
-  --image IMAGE --workload smallkernel --rate 5000 --noisy gemm -n 4 --reps 5
+  --image IMAGE --workload smallkernel --rate 100 --noisy gemm -n 4 --reps 5
 
 # MIG：分区必须已存在
 ./run.sh --gpu-confirmed --mode mig --mig-profile 3g.20gb \
@@ -63,8 +64,13 @@ python3 analyze/summarize.py results -o results/summary.csv
 
 ```bash
 ./matrix.sh --list
-./matrix.sh --gpu-confirmed --image IMAGE --results results/fractioning-v1 --reps 1
+./matrix.sh --gpu-confirmed --image IMAGE --results results/v2 --reps 1
+python3 analyze/summarize.py results/v2 -o results/v2-summary.csv
+python3 analyze/capacity.py results/v2
 ```
+
+实验组和判定标准见 [docs/experiment-design.md](docs/experiment-design.md)。C 组（传统 MPS）
+要切换集群模式，由 `k8s/run-legacy-group.sh` 完成，退出时自动恢复，必须在 `tmux` 里运行。
 
 `run.sh` 只创建自己的 Pod 和一个 ConfigMap，不会改动 `GpuFractioningConfig`、
 device plugin、Helm Release 或 MIG 分区。代码通过 ConfigMap 挂载，
