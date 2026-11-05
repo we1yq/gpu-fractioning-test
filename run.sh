@@ -7,15 +7,18 @@
 # Interference (Pod 0 is the victim, the other n-1 Pods run --noisy):
 #   ./run.sh ... --workload smallkernel --rate 200 --noisy gemm -n 4
 #
-# This script only creates its own Namespace, Pods and one ConfigMap. It never changes
+# This script only creates its own Pods and one ConfigMap. It never changes
 # GpuFractioningConfig, the device plugin, Helm releases or MIG partitions.
 #
-# KUBECTL overrides the client, for example:
-#   KUBECTL="sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml"
+# Credentials come from k8s/setup-access.sh, so sudo is not needed. KUBECTL
+# overrides the client. The RKE2 binary is preferred because it matches the
+# server version.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-read -r -a KUBE <<<"${KUBECTL:-kubectl}"
+DEFAULT_KUBECTL=kubectl
+[[ ! -x /var/lib/rancher/rke2/bin/kubectl ]] || DEFAULT_KUBECTL=/var/lib/rancher/rke2/bin/kubectl
+read -r -a KUBE <<<"${KUBECTL:-$DEFAULT_KUBECTL}"
 
 MODE="" COMPUTE="time-slicing" IMAGE="" WORKLOAD="" NOISY="" SIZE="" RATE=0
 COUNT=1 REPS=5 DURATION=60 WARMUP=10 SLACK=120 COOLDOWN=10 TIMEOUT=600
@@ -149,7 +152,6 @@ if [[ "$MODE" == fractioning ]]; then
   [[ "$ready" == *True* ]] || die "no GpuFractioningConfig is Ready; restore it first (this script will not)"
 fi
 
-"${KUBE[@]}" create namespace "$NAMESPACE" --dry-run=client -o yaml | "${KUBE[@]}" apply -f - >/dev/null
 "${KUBE[@]}" create configmap "$CONFIGMAP" -n "$NAMESPACE" \
   --from-file="$ROOT/bench/bench.py" --from-file="$ROOT/bench/workloads.py" \
   --dry-run=client -o yaml | "${KUBE[@]}" apply -f - >/dev/null

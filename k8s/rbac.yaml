@@ -1,0 +1,83 @@
+# Least-privilege identity for run.sh, so experiments need neither sudo nor the
+# cluster-admin kubeconfig. Installed by k8s/setup-access.sh.
+#
+# Grants: Pods, Pod logs and ConfigMaps in gpu-bench, and read-only access to
+# GpuFractioningConfig. It cannot exec into Pods, reach other namespaces, or
+# change anything in the Fractioning, KAI or GPU Operator stacks.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-bench
+  labels:
+    # Without this, permission to create Pods would amount to root on the node
+    # (hostPath, privileged). Baseline rejects those.
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-bench-runner
+  namespace: gpu-bench
+automountServiceAccountToken: false
+---
+# Delete this Secret to revoke the token immediately.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gpu-bench-runner-token
+  namespace: gpu-bench
+  annotations:
+    kubernetes.io/service-account.name: gpu-bench-runner
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gpu-bench-runner
+  namespace: gpu-bench
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gpu-bench-runner
+  namespace: gpu-bench
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gpu-bench-runner
+subjects:
+  - kind: ServiceAccount
+    name: gpu-bench-runner
+    namespace: gpu-bench
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gpu-bench-config-reader
+rules:
+  - apiGroups: ["gpu-fractioning.kai.scheduler"]
+    resources: ["gpufractioningconfigs"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gpu-bench-config-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gpu-bench-config-reader
+subjects:
+  - kind: ServiceAccount
+    name: gpu-bench-runner
+    namespace: gpu-bench

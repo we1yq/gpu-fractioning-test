@@ -22,9 +22,22 @@ analyze/    汇总 P50/P99 和干扰系数（作图待第 5 步补充）
 默认规模要能放进最小的切片（`1g.5gb`），这样所有配置跑的都是同一负载。
 正式实验前，先单独校准一次 `--size`。
 
+## 集群访问
+
+在服务器上运行一次，之后 `run.sh` 不需要 `sudo`：
+
+```bash
+./k8s/setup-access.sh
+```
+
+它会安装 `k8s/rbac.yaml`，并写入 `~/.kube/config`，已有该文件时会拒绝覆盖。
+这个账号只能操作 `gpu-bench` 里的 Pod、Pod 日志和 ConfigMap，并只读
+`GpuFractioningConfig`。恢复或关闭 Fractioning 仍需管理员权限。
+
 ## 运行
 
-先确认同事已结束 GPU 工作，再加 `--gpu-confirmed`。
+先确认同事已结束 GPU 工作，再加 `--gpu-confirmed`。长时间运行放在 `tmux` 里，
+SSH 断开时 `run.sh` 会退出。
 
 ```bash
 # 只渲染 manifest，不接触集群
@@ -45,7 +58,7 @@ analyze/    汇总 P50/P99 和干扰系数（作图待第 5 步补充）
 python3 analyze/summarize.py results -o results/summary.csv
 ```
 
-`run.sh` 只创建自己的 Namespace、Pod 和一个 ConfigMap，不会改动 `GpuFractioningConfig`、
+`run.sh` 只创建自己的 Pod 和一个 ConfigMap，不会改动 `GpuFractioningConfig`、
 device plugin、Helm Release 或 MIG 分区。代码通过 ConfigMap 挂载，
 镜像只需要带 PyTorch。
 
